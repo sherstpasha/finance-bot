@@ -20,6 +20,8 @@ from google_utils import (
     delete_row,
 )
 from states import AddRecord, EditRecord
+from middlewares import AccessMiddleware
+
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
@@ -316,6 +318,8 @@ async def apply_update(message: Message, state: FSMContext):
 
 
 async def main():
+    dp.message.middleware(AccessMiddleware())
+    dp.callback_query.middleware(AccessMiddleware())
     await dp.start_polling(bot)
 
 

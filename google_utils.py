@@ -25,7 +25,7 @@ def create_spreadsheet():
 
     # Даем доступ указанному email
     if OWNER_EMAIL:
-        spreadsheet.share(OWNER_EMAIL, perm_type="user", role="writer")
+        spreadsheet.share(OWNER_EMAIL, perm_type="user", role="reader")
 
     with open(USER_CONFIG_FILE, "w") as f:
         json.dump({"spreadsheet_id": spreadsheet.id}, f)
