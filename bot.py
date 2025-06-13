@@ -22,14 +22,14 @@ from google_utils import (
 from states import AddRecord, EditRecord
 from middlewares import AccessMiddleware
 
-
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
+# Главное меню: Доход, Расход, Изменить, Удалить
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="➕ Добавить")],
-        [KeyboardButton(text="✏️ Изменить")],
+        [KeyboardButton(text="Доход"), KeyboardButton(text="Расход")],
+        [KeyboardButton(text="Изменить"), KeyboardButton(text="Удалить")],
     ],
     resize_keyboard=True,
 )
@@ -38,22 +38,35 @@ main_menu = ReplyKeyboardMarkup(
 async def cleanup_and_confirm(
     chat_id: int,
     msg_ids: list[int],
-    confirm_text: str,
-    reply_markup: ReplyKeyboardMarkup = None,
+    confirm_text: str | None = None,
+    reply_markup: ReplyKeyboardMarkup | None = None,
 ):
-    # удаляем накопленные по списку
+    # удаляем промежуточные
     for mid in msg_ids:
         try:
             await bot.delete_message(chat_id, mid)
         except:
             pass
-    # отправляем одно подтверждение
-    await bot.send_message(
-        chat_id, confirm_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
-    )
+
+    # если нужно отправить клавиатуру — даже без текста
+    if reply_markup:
+        text = confirm_text if confirm_text is not None else "\u200b"
+        await bot.send_message(
+            chat_id,
+            text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML,
+        )
+    # иначе, если дали только текст — отправляем его
+    elif confirm_text is not None:
+        await bot.send_message(
+            chat_id,
+            confirm_text,
+            parse_mode=ParseMode.HTML,
+        )
 
 
-# ========== START / MAIN MENU ==========
+# ========== START ==========
 
 
 @dp.message(Command("start"))
@@ -71,50 +84,33 @@ async def start_handler(message: Message, state: FSMContext):
     await state.clear()
 
 
-# ========== ADD RECORD ==========
+# ========== ADD RECORD (Income/Expense) ==========
 
 
-@dp.message(F.text == "➕ Добавить")
-async def add_start(message: Message, state: FSMContext):
-    # инициализируем список msg_ids
-    await state.set_data({"msg_ids": [message.message_id]})
-
-    kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="Доход"), KeyboardButton(text="Расход")],
-            [KeyboardButton(text="⬅ Назад")],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    bot_msg = await message.answer("Выберите тип записи:", reply_markup=kb)
-
-    # читаем контекст и добавляем id бота
-    data = await state.get_data()
-    msg_ids = data["msg_ids"] + [bot_msg.message_id]
-    await state.update_data(msg_ids=msg_ids)
-
-    await state.set_state(AddRecord.choosing_type)
-
-
-@dp.message(AddRecord.choosing_type, F.text.in_(["Доход", "Расход"]))
-async def type_chosen(message: Message, state: FSMContext):
-    data = await state.get_data()
-    msg_ids = data["msg_ids"] + [message.message_id]
-    await state.update_data(entry_type=message.text, msg_ids=msg_ids)
-
+async def _ask_for_data(message: Message, state: FSMContext, entry_type: str):
+    await state.set_data({"msg_ids": [message.message_id], "entry_type": entry_type})
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="⬅ Назад")]],
         resize_keyboard=True,
         one_time_keyboard=True,
     )
     bot_msg = await message.answer(
-        "Введите: сумма, категория 1, категория 2", reply_markup=kb
+        "Введите: сумма, категория 1, категория 2\nПример: 1200, еда, кафе",
+        reply_markup=kb,
     )
-
     data = await state.get_data()
     await state.update_data(msg_ids=data["msg_ids"] + [bot_msg.message_id])
     await state.set_state(AddRecord.entering_data)
+
+
+@dp.message(F.text == "Доход")
+async def add_income(message: Message, state: FSMContext):
+    await _ask_for_data(message, state, "Доход")
+
+
+@dp.message(F.text == "Расход")
+async def add_expense(message: Message, state: FSMContext):
+    await _ask_for_data(message, state, "Расход")
 
 
 @dp.message(AddRecord.entering_data)
@@ -122,10 +118,10 @@ async def process_data(message: Message, state: FSMContext):
     data = await state.get_data()
     msg_ids = data["msg_ids"] + [message.message_id]
 
-    # кнопка Назад
+    # Назад → просто показать главное меню
     if message.text == "⬅ Назад":
         await cleanup_and_confirm(
-            message.chat.id, msg_ids, "Главное меню:", reply_markup=main_menu
+            message.chat.id, msg_ids, confirm_text=None, reply_markup=main_menu
         )
         return await state.clear()
 
@@ -134,27 +130,29 @@ async def process_data(message: Message, state: FSMContext):
         parts = [p.strip() for p in message.text.split(",")]
         if len(parts) != 3:
             raise ValueError
-
         amount = float(parts[0])
         cat1, cat2 = parts[1], parts[2]
         append_row(
             [datetime.today().strftime("%Y-%m-%d"), entry_type, amount, cat1, cat2]
         )
 
-        confirm = f"✔ Запись добавлена: <b>{entry_type}</b> {amount}₽ — {cat1} / {cat2}"
         await cleanup_and_confirm(
-            message.chat.id, msg_ids, confirm, reply_markup=main_menu
+            message.chat.id,
+            msg_ids,
+            confirm_text=f"✔ Запись добавлена: <b>{entry_type}</b> {amount}₽ — {cat1} / {cat2}",
+            reply_markup=main_menu,
         )
+
     except:
         await message.answer("Ошибка формата. Пример: 1200, еда, кафе")
     finally:
         await state.clear()
 
 
-# ========== EDIT / DELETE RECORD ==========
+# ========== EDIT / DELETE ==========
 
 
-@dp.message(F.text == "✏️ Изменить")
+@dp.message(F.text == "Изменить")
 async def edit_start(message: Message, state: FSMContext):
     rows = get_last_rows()
     if not rows:
@@ -162,21 +160,49 @@ async def edit_start(message: Message, state: FSMContext):
             "Нет записей для изменения.", reply_markup=main_menu
         )
 
-    # инициализируем msg_ids и сохраняем строки
-    await state.set_data({"msg_ids": [message.message_id], "rows": rows})
+    recent = rows[-5:]
+    await state.set_data(
+        {"msg_ids": [message.message_id], "rows": recent, "action": "edit"}
+    )
 
-    text = "Выберите запись:\n"
-    for i, row in enumerate(rows, 1):
+    text = "Выберите запись для редактирования:\n"
+    for i, row in enumerate(recent, 1):
         text += f"{i}) {row[0]} — {row[1]} {row[2]}₽ — {row[3]}/{row[4]}\n"
 
-    buttons = [[KeyboardButton(text=str(i))] for i in range(1, len(rows) + 1)]
+    buttons = [[KeyboardButton(text=str(i))] for i in range(1, len(recent) + 1)]
     buttons.append([KeyboardButton(text="⬅ Назад")])
     kb = ReplyKeyboardMarkup(
         keyboard=buttons, resize_keyboard=True, one_time_keyboard=True
     )
 
     bot_msg = await message.answer(text, reply_markup=kb)
+    data = await state.get_data()
+    await state.update_data(msg_ids=data["msg_ids"] + [bot_msg.message_id])
+    await state.set_state(EditRecord.choosing_record)
 
+
+@dp.message(F.text == "Удалить")
+async def delete_start(message: Message, state: FSMContext):
+    rows = get_last_rows()
+    if not rows:
+        return await message.answer("Нет записей для удаления.", reply_markup=main_menu)
+
+    recent = rows[-5:]
+    await state.set_data(
+        {"msg_ids": [message.message_id], "rows": recent, "action": "delete"}
+    )
+
+    text = "Выберите запись для удаления:\n"
+    for i, row in enumerate(recent, 1):
+        text += f"{i}) {row[0]} — {row[1]} {row[2]}₽ — {row[3]}/{row[4]}\n"
+
+    buttons = [[KeyboardButton(text=str(i))] for i in range(1, len(recent) + 1)]
+    buttons.append([KeyboardButton(text="⬅ Назад")])
+    kb = ReplyKeyboardMarkup(
+        keyboard=buttons, resize_keyboard=True, one_time_keyboard=True
+    )
+
+    bot_msg = await message.answer(text, reply_markup=kb)
     data = await state.get_data()
     await state.update_data(msg_ids=data["msg_ids"] + [bot_msg.message_id])
     await state.set_state(EditRecord.choosing_record)
@@ -187,84 +213,54 @@ async def choose_record(message: Message, state: FSMContext):
     data = await state.get_data()
     msg_ids = data["msg_ids"] + [message.message_id]
 
+    # Назад → просто главное меню
     if message.text == "⬅ Назад":
         await cleanup_and_confirm(
-            message.chat.id, msg_ids, "Главное меню:", reply_markup=main_menu
+            message.chat.id, msg_ids, confirm_text=None, reply_markup=main_menu
         )
         return await state.clear()
 
-    rows = data["rows"]
     try:
-        idx = int(message.text)
-        if not 1 <= idx <= len(rows):
+        idx = int(message.text) - 1
+        rows = data["rows"]
+        if not (0 <= idx < len(rows)):
             raise ValueError
-
-        await state.update_data(selected_index=idx, msg_ids=msg_ids)
-
-        kb = ReplyKeyboardMarkup(
-            keyboard=[
-                [
-                    KeyboardButton(text="✏ Редактировать"),
-                    KeyboardButton(text="🗑 Удалить"),
-                ],
-                [KeyboardButton(text="⬅ Назад")],
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
-        bot_msg = await message.answer("Что сделать с записью?", reply_markup=kb)
-
-        data = await state.get_data()
-        await state.update_data(msg_ids=data["msg_ids"] + [bot_msg.message_id])
-        await state.set_state(EditRecord.choosing_action)
     except:
-        await message.answer("Нажмите кнопку с номером записи.")
+        return await message.answer("Нажмите кнопку с номером записи.")
 
+    action = data["action"]
+    selected = rows[idx]
+    all_rows = get_last_rows()
+    real_row = len(all_rows) - len(rows) + idx + 2  # +2 из-за заголовка
 
-@dp.message(EditRecord.choosing_action)
-async def action_selected(message: Message, state: FSMContext):
-    data = await state.get_data()
-    msg_ids = data["msg_ids"] + [message.message_id]
-
-    if message.text == "⬅ Назад":
+    if action == "delete":
+        delete_row(real_row)
         await cleanup_and_confirm(
-            message.chat.id, msg_ids, "Главное меню:", reply_markup=main_menu
+            message.chat.id,
+            msg_ids,
+            confirm_text="🗑 Запись удалена.",
+            reply_markup=main_menu,
         )
         return await state.clear()
 
-    idx = data["selected_index"]
-    old = data["rows"][idx - 1]
-
-    # удаление
-    if message.text == "🗑 Удалить":
-        row_num = len(get_last_rows()) - idx + 2
-        delete_row(row_num)
-        await cleanup_and_confirm(
-            message.chat.id, msg_ids, "🗑 Запись удалена.", reply_markup=main_menu
-        )
-        return await state.clear()
-
-    # редактирование
-    new_type = "Доход" if old[1] == "Расход" else "Расход"
+    # action == "edit"
     kb = ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text=f"🔁 Сменить тип на {new_type}"),
-                KeyboardButton(text="⬅ Назад"),
-            ],
-        ],
+        keyboard=[[KeyboardButton(text="⬅ Назад")]],
         resize_keyboard=True,
+        one_time_keyboard=True,
     )
     prompt = (
         f"Текущая запись:\n"
-        f"{old[0]} — {old[1]} {old[2]}₽ — {old[3]}/{old[4]}\n\n"
-        "Введите: сумма, категория 1, категория 2"
+        f"{selected[0]} — {selected[1]} {selected[2]}₽ — {selected[3]}/{selected[4]}\n\n"
+        "Введите новые данные через запятую:\n"
+        "Дата (ГГГГ-ММ-ДД), сумма, категория 1, категория 2\n"
+        "Пример: 2025-06-14, 1500, транспорт, метро"
     )
     bot_msg = await message.answer(prompt, reply_markup=kb)
 
     data = await state.get_data()
     await state.update_data(
-        msg_ids=data["msg_ids"] + [bot_msg.message_id], edit_type=old[1]
+        msg_ids=msg_ids + [bot_msg.message_id], selected_row=selected, real_row=real_row
     )
     await state.set_state(EditRecord.updating_record)
 
@@ -274,44 +270,42 @@ async def apply_update(message: Message, state: FSMContext):
     data = await state.get_data()
     msg_ids = data["msg_ids"] + [message.message_id]
 
-    # Назад
+    # Назад → главное меню
     if message.text == "⬅ Назад":
         await cleanup_and_confirm(
-            message.chat.id, msg_ids, "Главное меню:", reply_markup=main_menu
+            message.chat.id, msg_ids, confirm_text=None, reply_markup=main_menu
         )
         return await state.clear()
 
-    idx = data["selected_index"] - 1
-    old = data["rows"][idx]
-    edit_type = data.get("edit_type", old[1])
-
-    # смена типа
-    if message.text.startswith("🔁 Сменить тип"):
-        new_type = "Доход" if edit_type == "Расход" else "Расход"
-        row_num = len(get_last_rows()) - idx + 1
-        update_row(row_num, [old[0], new_type, old[2], old[3], old[4]])
-        await cleanup_and_confirm(
-            message.chat.id, msg_ids, "✅ Тип изменён.", reply_markup=main_menu
+    parts = [p.strip() for p in message.text.split(",")]
+    if len(parts) != 4:
+        return await message.answer(
+            "Ошибка формата. Введите: дата, сумма, категория1, категория2\n"
+            "Пример: 2025-06-14, 1500, транспорт, метро"
         )
-        return await state.clear()
 
-    # обновление данных
+    date_str, amount_str, cat1, cat2 = parts
     try:
-        parts = [p.strip() for p in message.text.split(",")]
-        if len(parts) != 3:
-            raise ValueError
-        amount = float(parts[0])
-        cat1, cat2 = parts[1], parts[2]
-        new_row = [old[0], edit_type, amount, cat1, cat2]
-        row_num = len(get_last_rows()) - idx + 1
-        update_row(row_num, new_row)
-        await cleanup_and_confirm(
-            message.chat.id, msg_ids, "✔ Запись обновлена.", reply_markup=main_menu
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return await message.answer("Неверный формат даты. Используй ГГГГ-ММ-ДД.")
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        return await message.answer(
+            "Неверный формат суммы. Введите число, например 1500."
         )
-    except:
-        await message.answer("Ошибка формата. Пример: 1500, транспорт, метро")
-    finally:
-        await state.clear()
+
+    entry_type = data["selected_row"][1]
+    update_row(data["real_row"], [date_str, entry_type, amount, cat1, cat2])
+
+    await cleanup_and_confirm(
+        message.chat.id,
+        msg_ids,
+        confirm_text="✔ Запись обновлена.",
+        reply_markup=main_menu,
+    )
+    await state.clear()
 
 
 # ========== RUN ==========
