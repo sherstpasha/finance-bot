@@ -31,3 +31,37 @@ def create_spreadsheet():
         json.dump({"spreadsheet_id": spreadsheet.id}, f)
 
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet.id}"
+
+
+def append_row(row):
+    client = authorize_gspread()
+    with open(USER_CONFIG_FILE, "r") as f:
+        spreadsheet_id = json.load(f)["spreadsheet_id"]
+    sheet = client.open_by_key(spreadsheet_id).sheet1
+    sheet.append_row(row)
+
+
+def get_last_rows(n=5):
+    client = authorize_gspread()
+    with open(USER_CONFIG_FILE, "r") as f:
+        spreadsheet_id = json.load(f)["spreadsheet_id"]
+    sheet = client.open_by_key(spreadsheet_id).sheet1
+    all_rows = sheet.get_all_values()
+    return all_rows[1:][-n:]  # без заголовков
+
+
+def update_row(row_index, new_row):
+    client = authorize_gspread()
+    with open(USER_CONFIG_FILE, "r") as f:
+        spreadsheet_id = json.load(f)["spreadsheet_id"]
+    sheet = client.open_by_key(spreadsheet_id).sheet1
+    for i, value in enumerate(new_row, 1):
+        sheet.update_cell(row_index, i, value)
+
+
+def delete_row(row_index):
+    client = authorize_gspread()
+    with open(USER_CONFIG_FILE, "r") as f:
+        spreadsheet_id = json.load(f)["spreadsheet_id"]
+    sheet = client.open_by_key(spreadsheet_id).sheet1
+    sheet.delete_rows(row_index)
