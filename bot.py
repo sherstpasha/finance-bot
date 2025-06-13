@@ -1,6 +1,7 @@
 import asyncio
 import os
 import json
+import re
 from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
@@ -18,14 +19,16 @@ from google_utils import (
     get_last_rows,
     update_row,
     delete_row,
+    get_categories,
+    create_category_sheet_if_missing,
+    add_category_to_sheet,
 )
-from states import AddRecord, EditRecord
+from states import AddRecord, EditRecord, ConfirmCategory
 from middlewares import AccessMiddleware
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
-# Главное меню: Доход, Расход, Изменить, Удалить
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Доход"), KeyboardButton(text="Расход")],
@@ -35,35 +38,34 @@ main_menu = ReplyKeyboardMarkup(
 )
 
 
+def normalize(text: str) -> str:
+    # оставляем только буквы и цифры, приводим к нижнему регистру
+    return re.sub(r"[^0-9a-zA-Zа-яА-Я]", "", text).lower()
+
+
+# Убедимся, что лист "Категории" существует
+create_category_sheet_if_missing()
+
+
 async def cleanup_and_confirm(
     chat_id: int,
     msg_ids: list[int],
     confirm_text: str | None = None,
     reply_markup: ReplyKeyboardMarkup | None = None,
 ):
-    # удаляем промежуточные
     for mid in msg_ids:
         try:
             await bot.delete_message(chat_id, mid)
         except:
             pass
 
-    # если нужно отправить клавиатуру — даже без текста
     if reply_markup:
         text = confirm_text if confirm_text is not None else "\u200b"
         await bot.send_message(
-            chat_id,
-            text,
-            reply_markup=reply_markup,
-            parse_mode=ParseMode.HTML,
+            chat_id, text, reply_markup=reply_markup, parse_mode=ParseMode.HTML
         )
-    # иначе, если дали только текст — отправляем его
     elif confirm_text is not None:
-        await bot.send_message(
-            chat_id,
-            confirm_text,
-            parse_mode=ParseMode.HTML,
-        )
+        await bot.send_message(chat_id, confirm_text, parse_mode=ParseMode.HTML)
 
 
 # ========== START ==========
@@ -118,38 +120,97 @@ async def process_data(message: Message, state: FSMContext):
     data = await state.get_data()
     msg_ids = data["msg_ids"] + [message.message_id]
 
-    # Назад → просто показать главное меню
     if message.text == "⬅ Назад":
-        await cleanup_and_confirm(
-            message.chat.id, msg_ids, confirm_text=None, reply_markup=main_menu
-        )
+        await cleanup_and_confirm(message.chat.id, msg_ids, reply_markup=main_menu)
         return await state.clear()
 
-    entry_type = data["entry_type"]
-    try:
-        parts = [p.strip() for p in message.text.split(",")]
-        if len(parts) != 3:
-            raise ValueError
-        amount = float(parts[0])
-        cat1, cat2 = parts[1], parts[2]
-        append_row(
-            [datetime.today().strftime("%Y-%m-%d"), entry_type, amount, cat1, cat2]
-        )
+    parts = [p.strip() for p in message.text.split(",")]
+    if len(parts) != 3:
+        return await message.answer("Ошибка формата. Пример: 1200, еда, кафе")
 
+    amount_str, cat1_raw, cat2_raw = parts
+    try:
+        amount = float(amount_str)
+    except:
+        return await message.answer("Неверная сумма. Введите число.")
+
+    # нормализуем
+    n1, n2 = normalize(cat1_raw), normalize(cat2_raw)
+    existing = get_categories()  # список нормализованных кортежей
+
+    if (n1, n2) not in existing:
+        # спросим подтверждение
+        await state.update_data(
+            temp_amount=amount,
+            temp_cat1=cat1_raw,
+            temp_cat2=cat2_raw,
+            norm_pair=(n1, n2),
+        )
+        kb = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="Да"), KeyboardButton(text="Нет")],
+                [KeyboardButton(text="⬅ Назад")],
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+        await message.answer(
+            f"❓ Новая категория: <b>{cat1_raw}</b> / <b>{cat2_raw}</b>. Добавить?",
+            reply_markup=kb,
+        )
+        return await state.set_state(ConfirmCategory.ask)
+
+    # категория известна — сразу добавляем
+    append_row(
+        [
+            datetime.today().strftime("%Y-%m-%d"),
+            data["entry_type"],
+            amount,
+            cat1_raw,
+            cat2_raw,
+        ]
+    )
+    await cleanup_and_confirm(
+        message.chat.id,
+        msg_ids,
+        confirm_text=f"✔ Запись добавлена: <b>{data['entry_type']}</b> {amount}₽ — {cat1_raw} / {cat2_raw}",
+        reply_markup=main_menu,
+    )
+    await state.clear()
+
+
+@dp.message(ConfirmCategory.ask)
+async def confirm_category(message: Message, state: FSMContext):
+    data = await state.get_data()
+    msg_ids = data["msg_ids"] + [message.message_id]
+
+    if message.text == "Да":
+        n1, n2 = data["norm_pair"]
+        add_category_to_sheet(data["temp_cat1"], data["temp_cat2"])
+        append_row(
+            [
+                datetime.today().strftime("%Y-%m-%d"),
+                data["entry_type"],
+                data["temp_amount"],
+                data["temp_cat1"],
+                data["temp_cat2"],
+            ]
+        )
         await cleanup_and_confirm(
             message.chat.id,
             msg_ids,
-            confirm_text=f"✔ Запись добавлена: <b>{entry_type}</b> {amount}₽ — {cat1} / {cat2}",
+            confirm_text=f"✔ Новая категория и запись добавлены",
             reply_markup=main_menu,
         )
 
-    except:
-        await message.answer("Ошибка формата. Пример: 1200, еда, кафе")
-    finally:
-        await state.clear()
+    else:
+        # либо отказ, либо "Нет"/"⬅ Назад"
+        await cleanup_and_confirm(message.chat.id, msg_ids, reply_markup=main_menu)
+
+    await state.clear()
 
 
-# ========== EDIT / DELETE ==========
+# ========== EDIT / DELETE (без изменений) ==========
 
 
 @dp.message(F.text == "Изменить")

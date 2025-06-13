@@ -1,6 +1,10 @@
 from aiogram.fsm.state import State, StatesGroup
 
 
+class ConfirmCategory(StatesGroup):
+    ask = State()
+
+
 class AddRecord(StatesGroup):
     choosing_type = State()
     entering_data = State()
